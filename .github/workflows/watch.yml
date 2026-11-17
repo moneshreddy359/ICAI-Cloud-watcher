@@ -2,12 +2,16 @@ name: ICAI MCS watcher
 
 on:
   schedule:
-    - cron: "7 * * * *"   # tries to start a new run every hour; only one runs at a time
-  workflow_dispatch:       # lets you start it by hand from the Actions tab
+    - cron: "7 * * * *"   # backup: tries to start a run every hour; only one runs at a time
+  workflow_dispatch:       # lets you start it by hand, and lets a run start the next one
 
 concurrency:
   group: icai-watcher
   cancel-in-progress: false  # never kill the running watcher; the next one waits its turn
+
+permissions:
+  contents: read
+  actions: write           # needed so a run can start the next run
 
 jobs:
   watch:
@@ -15,6 +19,9 @@ jobs:
     timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
+
+      - name: Remember start time
+        run: echo "RUN_START=$(date +%s)" >> "$GITHUB_ENV"
 
       - uses: actions/setup-python@v5
         with:
@@ -31,3 +38,23 @@ jobs:
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           RUN_MINUTES: "345"
         run: python icai_cloud_watcher.py
+
+      - name: Start the next run
+        # Runs even if the watcher step failed. The new run waits in line and
+        # begins the moment this one ends, so there is almost no gap.
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ELAPSED=$(( $(date +%s) - RUN_START ))
+          echo "This run lasted ${ELAPSED}s"
+          # Safety: only chain if this run really ran for 10+ minutes.
+          # If it failed instantly, the hourly timer is the fallback,
+          # so a broken run can never cause an endless fast loop.
+          if [ "$ELAPSED" -ge 600 ]; then
+            gh workflow run watch.yml --repo "${{ github.repository }}" --ref "${{ github.ref_name }}"
+            echo "Next run queued."
+          else
+            echo "Run was too short, not chaining."
+          fi
